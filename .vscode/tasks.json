@@ -1,0 +1,105 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "probe-write-file",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Set-Content -Path .terminal_probe.txt -Value probe"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "uv-permission-repair-sync",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"$ErrorActionPreference='Continue'; $venv=(Resolve-Path .venv).Path; Get-Process python,pythonw -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path -like \"$venv*\" } | ForEach-Object { Stop-Process -Id $_.Id -Force }; icacls .venv /remove:d Everyone /T /C | Out-File -FilePath .uv_acl_fix.log -Encoding utf8; attrib -R .venv /S /D; uv sync *> .uv_sync.log"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "uv-permission-repair-sync",
+			"type": "shell",
+			"command": "$ErrorActionPreference='Continue'; $venv=(Resolve-Path .venv).Path; Get-Process python,pythonw -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path -like \"$venv*\" } | ForEach-Object { Stop-Process -Id $_.Id -Force }; icacls .venv /remove:d Everyone /T /C | Out-File -FilePath .uv_acl_fix.log -Encoding utf8; attrib -R .venv /S /D; uv sync *> .uv_sync.log",
+			"isBackground": false
+		},
+		{
+			"label": "uv-permission-repair-sync-2",
+			"type": "shell",
+			"command": "$ErrorActionPreference='Continue'; $venv=(Resolve-Path .venv).Path; Get-Process python,pythonw -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path -like \"$($venv)*\" } | ForEach-Object { Stop-Process -Id $_.Id -Force }; icacls .venv /remove:d Everyone /T /C | Out-File -FilePath .uv_acl_fix.log -Encoding utf8; attrib -R .venv /S /D; uv sync *> .uv_sync.log",
+			"isBackground": false
+		},
+		{
+			"label": "uv-permission-repair-sync-3",
+			"type": "shell",
+			"command": "$ErrorActionPreference='Continue'; $venv=(Resolve-Path .venv).Path; Get-Process python,pythonw -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($venv, [System.StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Stop-Process -Id $_.Id -Force }; icacls .venv /remove:d Everyone /T /C | Out-File -FilePath .uv_acl_fix.log -Encoding utf8; attrib -R .venv /S /D; uv sync *> .uv_sync.log",
+			"isBackground": false
+		},
+		{
+			"label": "show-uv-sync-log",
+			"type": "shell",
+			"command": "Get-Content -Path .uv_sync.log -Encoding Unicode",
+			"isBackground": false
+		},
+		{
+			"label": "uv-sync-check",
+			"type": "shell",
+			"command": "uv sync",
+			"isBackground": false
+		},
+		{
+			"label": "recreate-venv-with-uv",
+			"type": "shell",
+			"command": "if (Test-Path .venv) { icacls .venv /remove:d Everyone /T /C | Out-Null; attrib -R .venv /S /D; Remove-Item .venv -Recurse -Force }; uv sync",
+			"isBackground": false
+		},
+		{
+			"label": "uv-venv-recreate-explicit",
+			"type": "shell",
+			"command": "uv venv --clear .venv",
+			"isBackground": false
+		},
+		{
+			"label": "force-reset-delete-venv",
+			"type": "shell",
+			"command": "if (Test-Path .venv) { takeown /f .venv /r /d y | Out-Null; icacls .venv /reset /T /C | Out-Null; icacls .venv /remove:d Everyone /T /C | Out-Null; attrib -R .venv /S /D; Remove-Item .venv -Recurse -Force }; Write-Output \"venv_removed=$(!(Test-Path .venv))\"",
+			"isBackground": false
+		},
+		{
+			"label": "force-rmdir-venv",
+			"type": "shell",
+			"command": "if (Test-Path .venv) { takeown /f .venv /r /d y | Out-Null; icacls .venv /reset /T /C | Out-Null; icacls .venv /remove:d Everyone /T /C | Out-Null; attrib -R .venv /S /D; cmd /c rmdir /s /q .venv }; Write-Output \"venv_exists=$((Test-Path .venv))\"",
+			"isBackground": false
+		},
+		{
+			"label": "uv-sync-outside-onedrive",
+			"type": "shell",
+			"command": "$env:UV_PROJECT_ENVIRONMENT = \"$env:LOCALAPPDATA\\uv\\venvs\\llm-mas\"; uv sync",
+			"isBackground": false
+		},
+		{
+			"label": "uv-sync-outside-onedrive-2",
+			"type": "shell",
+			"command": "$env:UV_PROJECT_ENVIRONMENT = \"$($env:LOCALAPPDATA)\\uv\\venvs\\llm-mas\"; uv sync",
+			"isBackground": false
+		},
+		{
+			"label": "uv-sync-outside-onedrive-3",
+			"type": "shell",
+			"command": "$env:UV_PROJECT_ENVIRONMENT = (Join-Path $env:LOCALAPPDATA 'uv\\venvs\\llm-mas'); uv sync",
+			"isBackground": false
+		},
+		{
+			"label": "cleanup-temp-debug-files",
+			"type": "shell",
+			"command": "Remove-Item .terminal_probe.txt,.uv_acl_fix.log,.uv_sync.log -ErrorAction SilentlyContinue",
+			"isBackground": false
+		}
+	]
+}
