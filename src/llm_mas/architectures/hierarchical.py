@@ -1,99 +1,102 @@
-# hierarchical.py
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from dotenv import load_dotenv
-from langchain_classic.agents.agent import AgentExecutor
-from langchain_classic.agents.openai_functions_agent.base import (
-    create_openai_functions_agent,
-)
-from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
+from pydantic import BaseModel
 
 load_dotenv()
-
-llm = ChatOpenAI(model="gpt-4o")
-
-# --- Sub-agents (same as flat, abbreviated) ---
-@tool
-def search_web(query: str) -> str:
-    """Search the web for information."""
-    return f"[Results: {query}]"
+llm = ChatOpenAI(model="gpt-4o", temperature=0)
 
 
-@tool
-def run_python(code: str) -> str:
-    """Execute Python code."""
-    return f"[Output: {code}]"
-
-
-@tool
-def write_file(name: str, text: str) -> str:
-    """Write text to a file."""
-    return f"[Saved: {name}]"
-
-def make_agent(name, desc, tools):
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", f"You are {name}. {desc}"),
-        ("human", "{input}"),
-        ("placeholder", "{agent_scratchpad}"),
-    ])
-    return AgentExecutor(
-        agent=create_openai_functions_agent(llm, tools, prompt),
-        tools=tools, verbose=True
-    )
-
-researcher = make_agent("Researcher", "Find information.", [search_web])
-coder      = make_agent("Coder",      "Write code.",       [run_python])
-writer     = make_agent("Writer",     "Write documents.",  [write_file])
-
-# --- Supervisor: plans a sequential list of steps ---
-SUPERVISOR_PROMPT = ChatPromptTemplate.from_template(
-    "You are a supervisor. Decompose the task into an ordered list of steps.\n"
-    "Each step must assign work to one of: researcher, coder, writer.\n"
-    "Return JSON: {{\"steps\": [{{\"agent\": \"...\", \"instruction\": \"...\"}}]}}\n\n"
-    "Task: {task}\nCompleted so far:\n{history}"
-)
-plan_chain = SUPERVISOR_PROMPT | llm | JsonOutputParser()
-
-# --- LangGraph state ---
-class MASState(TypedDict):
+# --- State ---
+class HierarchicalState(TypedDict):
     task: str
-    steps: list
-    history: str
-    current_step: int
+    worker_outputs: list[str]
+    status: Literal["delegating", "synthesizing", "done"]
     final_output: str
 
-AGENTS_MAP = {"researcher": researcher, "coder": coder, "writer": writer}
 
-def supervisor_node(state: MASState) -> MASState:
-    plan = plan_chain.invoke({"task": state["task"], "history": state["history"]})
-    return {**state, "steps": plan["steps"], "current_step": 0}
+# --- Structured Output for Orchestrator ---
+class OrchestratorDecision(BaseModel):
+    next_action: Literal["call_researcher", "call_coder", "synthesize"]
+    instruction: str
 
-def worker_node(state: MASState) -> MASState:
-    idx   = state["current_step"]
-    step  = state["steps"][idx]
-    agent = AGENTS_MAP[step["agent"]]
-    result = agent.invoke({"input": step["instruction"]})["output"]
-    history = state["history"] + f"\n[{step['agent']}]: {result}"
-    return {**state, "history": history, "current_step": idx + 1}
 
-def should_continue(state: MASState) -> str:
-    return "worker" if state["current_step"] < len(state["steps"]) else END
+orchestrator_llm = llm.with_structured_output(OrchestratorDecision)
 
-graph = StateGraph(MASState)
-graph.add_node("supervisor", supervisor_node)
-graph.add_node("worker",     worker_node)
-graph.set_entry_point("supervisor")
-graph.add_edge("supervisor", "worker")
-graph.add_conditional_edges("worker", should_continue)
-app = graph.compile()
 
-if __name__ == "__main__":
-    result = app.invoke({
-        "task": "Research transformer architectures, implement a toy model, then write a report.",
-        "steps": [], "history": "", "current_step": 0, "final_output": ""
-    })
-    print(result["history"])
+# --- Nodes ---
+def orchestrator_node(state: HierarchicalState):
+    history = "\n".join(state["worker_outputs"])
+    prompt = f"Task: {state['task']}\nHistory:\n{history}\nDecide the next step."
+
+    decision = orchestrator_llm.invoke([{"role": "user", "content": prompt}])
+
+    if decision.next_action == "synthesize":
+        return {"status": "synthesizing"}
+    else:
+        # Route to a worker and pass the specific instruction
+        return {
+            "status": decision.next_action,
+            "task": decision.instruction,
+        }  # Overloading task temporarily for the worker
+
+
+def worker_node(state: HierarchicalState, role: str):
+    # Mock worker execution (replace with create_agent)
+    instruction = state["task"]
+    response = llm.invoke(
+        [{"role": "system", "content": f"You are a {role}. Execute: {instruction}"}]
+    )
+    return {
+        "worker_outputs": state["worker_outputs"] + [f"[{role}]: {response.content}"],
+        "status": "delegating",
+    }
+
+
+def synthesize_node(state: HierarchicalState):
+    history = "\n".join(state["worker_outputs"])
+    prompt = f"Synthesize this data to answer: {state['task']}\nData: {history}"
+    response = llm.invoke([{"role": "user", "content": prompt}])
+    return {"final_output": response.content, "status": "done"}
+
+
+# --- Graph ---
+workflow = StateGraph(HierarchicalState)
+workflow.add_node("orchestrator", orchestrator_node)
+workflow.add_node("researcher", lambda state: worker_node(state, "Researcher"))
+workflow.add_node("coder", lambda state: worker_node(state, "Coder"))
+workflow.add_node("synthesizer", synthesize_node)
+
+workflow.set_entry_point("orchestrator")
+
+
+def router(state: HierarchicalState):
+    if state["status"] == "call_researcher":
+        return "researcher"
+    if state["status"] == "call_coder":
+        return "coder"
+    if state["status"] == "synthesizing":
+        return "synthesizer"
+    if state["status"] == "done":
+        return END
+    return "orchestrator"
+
+
+workflow.add_conditional_edges("orchestrator", router)
+workflow.add_edge("researcher", "orchestrator")  # Star topology: always return to orchestrator
+workflow.add_edge("coder", "orchestrator")
+workflow.add_edge("synthesizer", END)
+
+app = workflow.compile()
+
+# Run Demo
+result = app.invoke(
+    {
+        "task": "What is the capital of France?",
+        "worker_outputs": [],
+        "status": "delegating",
+        "final_output": "",
+    }
+)

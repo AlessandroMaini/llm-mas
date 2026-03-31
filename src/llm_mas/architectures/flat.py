@@ -1,67 +1,93 @@
-# flat.py
+import operator
+from collections.abc import Sequence
+from typing import Annotated, TypedDict
+
 from dotenv import load_dotenv
-from langchain_classic.agents.agent import AgentExecutor
-from langchain_classic.agents.openai_functions_agent.base import (
-    create_openai_functions_agent,
-)
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.agents import create_agent
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
+from langgraph.graph import END, StateGraph
 
 load_dotenv()
+llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
 
-llm = ChatOpenAI(model="gpt-4o")
 
-# --- Define peer agents ---
-def make_agent(name: str, description: str, tools: list) -> AgentExecutor:
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", f"You are {name}. {description}"),
-        MessagesPlaceholder("chat_history", optional=True),
-        ("human", "{input}"),
-        MessagesPlaceholder("agent_scratchpad"),
-    ])
-    agent = create_openai_functions_agent(llm, tools, prompt)
-    return AgentExecutor(agent=agent, tools=tools, verbose=True)
-
+# --- Tools ---
 @tool
 def search_web(query: str) -> str:
     """Search the web for information."""
-    return f"[Web results for: {query}]"
+    return f"[Web: {query}]"
+
 
 @tool
-def run_python(code: str) -> str:
-    """Execute Python code."""
-    return f"[Output of code: {code}]"
+def calculate(expression: str) -> str:
+    """Evaluate a math expression."""
+    return f"[Math: {expression}]"
 
-@tool
-def write_file(filename: str, content: str) -> str:
-    """Write content to a file."""
-    return f"[Written to {filename}]"
 
-researcher  = make_agent("Researcher",  "You find and summarize information.", [search_web])
-coder       = make_agent("Coder",       "You write and execute Python code.",   [run_python])
-writer      = make_agent("Writer",      "You produce well-written documents.",  [write_file])
+# --- State ---
+class PeerState(TypedDict):
+    messages: Annotated[Sequence[BaseMessage], operator.add]
+    sender: str
 
-AGENTS = {
-    "researcher": researcher,
-    "coder":      coder,
-    "writer":     writer,
-}
 
-# --- Flat router: LLM picks the right peer ---
-ROUTER_PROMPT = ChatPromptTemplate.from_template(
-    "Given the task below, choose one agent: researcher, coder, writer.\n"
-    "Reply with ONLY the agent name.\n\nTask: {task}"
+# --- Peer Nodes ---
+def create_peer_node(agent_name: str, system_prompt: str, tools: list):
+    # We compile a standard tool-calling agent
+    agent = create_agent(llm, tools, system_prompt=system_prompt)
+
+    def node(state: PeerState):
+        result = agent.invoke({"messages": state["messages"]})
+        final_message = result["messages"][-1]
+        # Wrap it to preserve sender info
+        msg = AIMessage(content=f"[{agent_name}]: {final_message.content}", name=agent_name)
+        return {"messages": [msg], "sender": agent_name}
+
+    return node
+
+
+researcher = create_peer_node(
+    "Researcher",
+    "You are a Researcher. Contribute facts. End your turn by asking the Critic for thoughts. If the task is fully solved, output 'TERMINATE'.",
+    [search_web],
 )
-router_chain = ROUTER_PROMPT | llm | StrOutputParser()
+critic = create_peer_node(
+    "Critic",
+    "You are a Critic. Analyze the Researcher's facts for flaws or logic gaps. End your turn by passing back to the Researcher. If the task is fully solved, output 'TERMINATE'.",
+    [calculate],
+)
 
-def run_flat_mas(task: str) -> str:
-    agent_name = router_chain.invoke({"task": task}).strip().lower()
-    agent = AGENTS.get(agent_name, researcher)
-    print(f"[Router] → {agent_name}")
-    result = agent.invoke({"input": task})
-    return result["output"]
 
-if __name__ == "__main__":
-    print(run_flat_mas("Find the latest Python 3.13 features and write a summary."))
+# --- Routing ---
+def peer_router(state: PeerState) -> str:
+    last_message = state["messages"][-1].content
+    if "TERMINATE" in last_message:
+        return END
+    # Simple turn-based routing (could be expanded to LLM-based mesh routing)
+    if state["sender"] == "Researcher":
+        return "critic"
+    else:
+        return "researcher"
+
+
+# --- Graph ---
+workflow = StateGraph(PeerState)
+workflow.add_node("researcher", researcher)
+workflow.add_node("critic", critic)
+
+workflow.set_entry_point("researcher")
+workflow.add_conditional_edges("researcher", peer_router)
+workflow.add_conditional_edges("critic", peer_router)
+
+app = workflow.compile()
+
+# Run Demo
+result = app.invoke(
+    {
+        "messages": [
+            HumanMessage(content="Brainstorm and evaluate the feasibility of a space elevator.")
+        ],
+        "sender": "user",
+    }
+)
